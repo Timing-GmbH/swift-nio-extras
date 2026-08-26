@@ -21,6 +21,8 @@ import Darwin
 import Musl
 #elseif canImport(Android)
 import Android
+#elseif canImport(WinSDK)
+import WinSDK
 #else
 import Glibc
 #endif

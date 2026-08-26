@@ -22,11 +22,21 @@ import Darwin
 import Musl
 #elseif canImport(Android)
 import Android
+#elseif canImport(WinSDK)
+import WinSDK
 #else
 import Glibc
 #endif
 
+#if os(Windows)
+// ucrt's `_write` takes an `unsigned int` byte count and returns `int`; POSIX `write` takes
+// `size_t` and returns `ssize_t`. Adapt so the call sites are unchanged.
+let sysWrite: @Sendable (CInt, UnsafeRawPointer?, Int) -> Int = { fd, buf, count in
+    Int(_write(fd, buf, UInt32(count)))
+}
+#else
 let sysWrite = write
+#endif
 
 struct TCPHeader {
     struct Flags: OptionSet {
@@ -111,7 +121,17 @@ struct PCAPRecordHeader {
 
     init(payloadLength: Int, addresses: AddressTuple, tcp: TCPHeader) {
         var tv = timeval()
+        #if os(Windows)
+        var ft = FILETIME()
+        GetSystemTimeAsFileTime(&ft)
+        // FILETIME is 100 ns ticks since 1601-01-01; 11644473600 s to the Unix epoch.
+        let ticks = (UInt64(ft.dwHighDateTime) << 32) | UInt64(ft.dwLowDateTime)
+        let usecSinceUnixEpoch = ticks / 10 &- 11_644_473_600_000_000
+        tv.tv_sec = CLong(usecSinceUnixEpoch / 1_000_000)
+        tv.tv_usec = CLong(usecSinceUnixEpoch % 1_000_000)
+        #else
         gettimeofday(&tv, nil)
+        #endif
         self = .init(payloadLength: payloadLength, addresses: addresses, time: tv, tcp: tcp)
     }
 }
@@ -614,8 +634,13 @@ extension ByteBuffer {
             self.writeInteger(.max, as: UInt8.self)  // TTL, `.max` as we don't care about the TTL
             self.writeInteger(6, as: UInt8.self)  // TCP
             self.writeInteger(0, as: UInt16.self)  // checksum
+            #if os(Windows)
+            self.writeInteger(la.address.sin_addr.S_un.S_addr, endianness: .host, as: UInt32.self)
+            self.writeInteger(ra.address.sin_addr.S_un.S_addr, endianness: .host, as: UInt32.self)
+            #else
             self.writeInteger(la.address.sin_addr.s_addr, endianness: .host, as: UInt32.self)
             self.writeInteger(ra.address.sin_addr.s_addr, endianness: .host, as: UInt32.self)
+            #endif
         case .v6(let la, let ra):
             let ipv6PayloadLength = tcpLength
             let recordLength = ipv6PayloadLength + 4 + 40  // IPv6 header length (+4 gives 32 bits for protocol id)
@@ -726,7 +751,12 @@ extension NIOWritePCAPHandler {
         ) throws -> SynchronizedFileSink {
             let oflag: CInt = fileWritingMode == FileWritingMode.createNewPCAPFile ? (O_TRUNC | O_CREAT) : O_APPEND
             let fd = try path.withCString { pathPtr -> CInt in
+                #if os(Windows)
+                var fd: CInt = -1
+                _ = _sopen_s(&fd, pathPtr, _O_WRONLY | _O_BINARY | oflag, _SH_DENYNO, _S_IREAD | _S_IWRITE)
+                #else
                 let fd = open(pathPtr, O_WRONLY | oflag, 0o600)
+                #endif
                 guard fd >= 0 else {
                     throw SynchronizedFileSink.Error(errorCode: Error.ErrorCode.cannotOpenFileError.rawValue)
                 }

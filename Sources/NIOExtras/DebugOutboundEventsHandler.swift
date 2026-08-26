@@ -20,6 +20,8 @@ import Darwin
 @preconcurrency import Musl
 #elseif canImport(Android)
 @preconcurrency import Android
+#elseif canImport(WinSDK)
+import WinSDK
 #else
 @preconcurrency import Glibc
 #endif
@@ -171,7 +173,11 @@ public class DebugOutboundEventsHandler: ChannelOutboundHandler {
             message = "Triggering user outbound event: { \(event) }"
         }
         print(message + " in \(context.name)")
+        #if os(Windows)
+        fflush(nil)  // ucrt does not expose `stdout` to Swift; nil flushes every open stream.
+        #else
         fflush(stdout)
+        #endif
     }
 }
 
